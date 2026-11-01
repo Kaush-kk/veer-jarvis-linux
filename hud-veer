@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+import curses, os, time, math, json, subprocess, threading, struct
+
+STATE_FILE = os.path.expanduser("~/.cache/veer_hud_state")
+CMD_JSON = os.path.expanduser("~/Vault/veer_commands.json")
+
+running = True
+mic_level = 0.0
+veer_speaking = False
+active_cmds = []
+
+def load_veer_commands():
+    global active_cmds
+    try:
+        if os.path.exists(CMD_JSON):
+            with open(CMD_JSON) as f:
+                data = json.load(f)
+                cmds = data.get("commands", [])
+                extracted = []
+                for c in cmds:
+                    trigs = c.get("triggers", [])
+                    if trigs:
+                        extracted.append(trigs[0])
+                if extracted:
+                    active_cmds = extracted[:5]
+                    return
+    except Exception:
+        pass
+    active_cmds = ["open vault", "play music", "start air sense", "system status", "protocol zero"]
+
+def is_veer_engine_running():
+    try:
+        r1 = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "veer.service"])
+        if r1.returncode == 0:
+            return True
+        r2 = subprocess.run(["pgrep", "-f", "veer_engine.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r2.returncode == 0
+    except Exception:
+        return False
+
+def is_tts_speaking():
+    try:
+        out = subprocess.check_output(["pgrep", "-fa", "edge_tts|ffplay|mpv.*voice_cache|paplay|aplay"], text=True).strip()
+        return bool(out)
+    except Exception:
+        return False
+
+def set_hud_state(st):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            f.write(st)
+    except Exception:
+        pass
+
+def get_hud_state():
+    alive = is_veer_engine_running()
+    try:
+        if os.path.exists(STATE_FILE):
+            st = open(STATE_FILE).read().strip()
+            if st == "BOOT" and alive:
+                return "BOOT"
+    except Exception:
+        pass
+    return "AWAKE" if alive else "DORMANT"
+
+def audio_listener_worker():
+    """Reads live microphone amplitude via PipeWire so the neural core pulses to your voice."""
+    global mic_level
+    while running:
+        if not is_veer_engine_running():
+            mic_level = 0.0
+            time.sleep(0.25)
+            continue
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["parec", "--format=s16le", "--rate=8000", "--channels=1", "--latency-msec=40"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            while running and is_veer_engine_running():
+                data = proc.stdout.read(640)
+                if not data:
+                    break
+                count = len(data) // 2
+                if count > 0:
+                    shorts = struct.unpack(f"<{count}h", data[:count * 2])
+                    rms = math.sqrt(sum(s * s for s in shorts) / count)
+                    norm = min(1.0, rms / 3800.0)
+                    mic_level = mic_level * 0.40 + norm * 0.60
+        except Exception:
+            time.sleep(0.5)
+        finally:
+            if proc:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+class BrailleCanvas:
+    def __init__(self, char_w, char_h):
+        self.cw = max(4, char_w)
+        self.ch = max(4, char_h)
+        self.pw = self.cw * 2
+        self.ph = self.ch * 4
+        self.grid = [[0] * self.cw for _ in range(self.ch)]
+
+    def set_px(self, x, y):
+        ix, iy = int(round(x)), int(round(y))
+        if 0 <= ix < self.pw and 0 <= iy < self.ph:
+            cx, cy = ix // 2, iy // 4
+            dx, dy = ix % 2, iy % 4
+            bit = (0x01 << dy) if dx == 0 else (0x08 << dy)
+            if dy == 3:
+                bit = 0x40 if dx == 0 else 0x80
+            self.grid[cy][cx] |= bit
+
+    def draw_ring(self, cx, cy, r, tilt=1.0, rot=0.0, steps=90, lobes=0, amp=0.0, phase=0.0):
+        for i in range(steps):
+            a = (i / steps) * math.tau
+            rad = r + (amp * math.sin(lobes * a + phase) if lobes else 0.0)
+            x0 = rad * math.cos(a)
+            y0 = rad * math.sin(a) * tilt
+            xr = x0 * math.cos(rot) - y0 * math.sin(rot)
+            yr = x0 * math.sin(rot) + y0 * math.cos(rot)
+            self.set_px(cx + xr, cy + yr)
+
+    def render_row(self, r):
+        return "".join(chr(0x2800 + b) for b in self.grid[r])
+
+def main(stdscr):
+    global running, veer_speaking
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_CYAN, -1)
+    curses.init_pair(2, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(3, curses.COLOR_GREEN, -1)
+    curses.init_pair(4, curses.COLOR_WHITE, -1)
+    curses.init_pair(5, curses.COLOR_YELLOW, -1)
+
+    load_veer_commands()
+    threading.Thread(target=audio_listener_worker, daemon=True).start()
+
+    t = 0.0
+    boot_progress = 0.0
+    last_state = get_hud_state()
+    blocks = "▁▂▃▄▅▆▇█"
+    nb = len(blocks)
+
+    while running:
+        t += 0.065
+        state = get_hud_state()
+
+        if state == "BOOT":
+            if last_state != "BOOT":
+                boot_progress = 0.0
+            boot_progress += 0.05
+            if boot_progress >= 1.0:
+                set_hud_state("AWAKE")
+                state = "AWAKE"
+        last_state = state
+
+        if int(t * 10) % 10 == 0:
+            veer_speaking = is_tts_speaking()
+
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        try:
+            if state == "DORMANT":
+                hdr = "✦ VEER NEURAL CORE // STATE: OFFLINE [PRESS SUPER+V OR 'V' TO IGNITE]"
+                hdr_col = curses.color_pair(4)
+            elif state == "BOOT":
+                pct = min(100, int(boot_progress * 100))
+                hdr = f"⚡ VEER NEURAL IGNITION // SYNAPTIC CALIBRATION: {pct}% ⚡"
+                hdr_col = curses.color_pair(2) | curses.A_BOLD
+            else:
+                mode_tag = "SPEAKING (RYAN-NEURAL)" if veer_speaking else "ONLINE & LISTENING"
+                hdr = f"✦ VEER NEURAL CORE // STATE: {mode_tag} [SUPER+V TO STOP]"
+                hdr_col = curses.color_pair(3) | curses.A_BOLD
+
+            stdscr.addstr(1, 2, hdr[:max(1, w - 4)], hdr_col)
+
+            art_w = max(16, min(32, (w // 2) - 2))
+            art_h = max(6, h - 5)
+            bc = BrailleCanvas(art_w, art_h)
+            pcx, pcy = bc.pw / 2.0, bc.ph / 2.0
+            max_r = max(4.0, min(pcx, pcy) - 3.0)
+
+            energy = min(1.0, mic_level * 1.8 + (0.45 if veer_speaking else 0.0))
+
+            if state == "DORMANT":
+                r_sleep = max_r * (0.28 + 0.04 * math.sin(t * 0.8))
+                bc.draw_ring(pcx, pcy, r_sleep, tilt=1.0, rot=t * 0.2, steps=64)
+                bc.draw_ring(pcx, pcy, r_sleep * 1.45, tilt=0.45, rot=-t * 0.15, steps=54)
+            elif state == "BOOT":
+                for k in range(1, 4):
+                    rk = max_r * ((boot_progress * k * 0.35) % 1.0)
+                    bc.draw_ring(pcx, pcy, rk, tilt=1.0, rot=t * 2.0, steps=80, lobes=6, amp=2.0, phase=t * 4.0)
+                bc.draw_ring(pcx, pcy, max_r * min(1.0, boot_progress) * 0.85, tilt=0.4, rot=t * 3.0, steps=90)
+            else:
+                core_r = max_r * (0.36 + energy * 0.28)
+                bc.draw_ring(pcx, pcy, core_r, tilt=1.0, rot=t * 0.7, steps=96, lobes=8, amp=1.2 + energy * 5.0, phase=t * 3.5)
+                bc.draw_ring(pcx, pcy, max_r * 0.72, tilt=0.42, rot=t * 0.9, steps=84, lobes=4, amp=energy * 3.0, phase=-t * 2.0)
+                bc.draw_ring(pcx, pcy, max_r * 0.72, tilt=0.42, rot=-t * 0.9 + 1.57, steps=84, lobes=4, amp=energy * 3.0, phase=t * 2.0)
+                bc.draw_ring(pcx, pcy, max_r * 0.94, tilt=1.0, rot=-t * 0.3, steps=72)
+
+            for r_idx in range(art_h):
+                if 3 + r_idx < h - 1:
+                    row_str = bc.render_row(r_idx)
+                    col = curses.color_pair(1) if (r_idx % 2 == 0 or state == "DORMANT") else curses.color_pair(2)
+                    if state == "BOOT" or energy > 0.20:
+                        col |= curses.A_BOLD
+                    stdscr.addstr(3 + r_idx, 2, row_str, col)
+
+            rx = art_w + 5
+            rw = w - rx - 2
+            if rw > 18:
+                stdscr.addstr(3, rx, "┌─ VEER NEURAL PIPELINE ───────────────┐"[:rw], curses.color_pair(2) | curses.A_BOLD)
+
+                lvl_bars = max(0, min(14, int(energy * 14)))
+                meter = "█" * lvl_bars + "░" * (14 - lvl_bars)
+                n1_st = "OFFLINE" if state == "DORMANT" else f"[{meter}]"
+                stdscr.addstr(4, rx, f"│ 01. PIPEWIRE MIC : {n1_st}"[:rw], curses.color_pair(1))
+
+                w_len = max(6, min(20, rw - 22))
+                if state == "DORMANT":
+                    wave = "─" * w_len
+                else:
+                    wave = "".join(
+                        blocks[max(0, min(nb - 1, int((math.sin(t * 3.0 + i * 0.7) * 0.5 + 0.5) * (1.5 + energy * (nb - 2)))))]
+                        for i in range(w_len)
+                    )
+                stdscr.addstr(5, rx, f"│     VOICE WAVE   : {wave}"[:rw], curses.color_pair(3 if energy > 0.15 else 1))
+
+                stt_st = "STANDBY" if state == "DORMANT" else ("LOADING MODEL..." if state == "BOOT" else "VOSK ZERO-LAG ACTIVE")
+                stdscr.addstr(7, rx, f"│ 02. STT ENGINE   : {stt_st}"[:rw], curses.color_pair(2 if state != "DORMANT" else 4))
+
+                stdscr.addstr(8, rx, "│ 03. INTENT HOOKS : ~/Vault/veer_commands"[:rw], curses.color_pair(1))
+                cmds_str = " | ".join(active_cmds)
+                stdscr.addstr(9, rx, f"│     VOICE CMDS   : {cmds_str}"[:rw], curses.color_pair(4))
+
+                tts_st = "IDLE" if state == "DORMANT" else ("SPEAKING ALOUD" if veer_speaking else "RYAN-NEURAL READY")
+                stdscr.addstr(11, rx, f"│ 04. NEURAL VOICE : {tts_st}"[:rw], curses.color_pair(3 if veer_speaking else 1))
+
+                if h > 14:
+                    stdscr.addstr(h - 2, rx, "[SUPER+V] or [V] Toggle Veer | [Q] Quit"[:rw], curses.color_pair(5))
+        except curses.error:
+            pass
+
+        stdscr.refresh()
+
+        ch = stdscr.getch()
+        if ch in (ord('v'), ord('V')):
+            subprocess.Popen(["/usr/local/bin/veer-toggle"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif ch in (ord('r'), ord('R')):
+            load_veer_commands()
+        elif ch in (ord('q'), ord('Q')):
+            running = False
+            break
+
+        time.sleep(0.04)
+
+if __name__ == "__main__":
+    curses.wrapper(main)

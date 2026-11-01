@@ -1,0 +1,139 @@
+{
+  "wake_phrases": [
+    "veer turn on",
+    "wake up",
+    "hey veer",
+    "veer"
+  ],
+  "wake_reply": "Veer online. Acoustic sensors calibrated and awaiting your command.",
+  "sleep_phrases": [
+    "veer standby",
+    "go to sleep",
+    "veer turn off"
+  ],
+  "sleep_reply": "Entering standby mode. Call my name when needed.",
+  "commands": [
+    {
+      "name": "open_vault",
+      "triggers": [
+        "open vault",
+        "launch vault",
+        "start writing"
+      ],
+      "reply": "Opening The Vault writing sanctuary.",
+      "action": "kitty /usr/local/bin/vault"
+    },
+    {
+      "name": "play_music",
+      "triggers": [
+        "play music",
+        "start music",
+        "next track",
+        "next song"
+      ],
+      "reply": "Playing audio from your Vault library.",
+      "action": "INTERNAL:PLAY_NEXT"
+    },
+    {
+      "name": "stop_music",
+      "triggers": [
+        "stop music",
+        "silence",
+        "pause audio",
+        "kill music"
+      ],
+      "reply": "Audio playback silenced.",
+      "action": "pkill -f 'mpv.*--no-video'"
+    },
+    {
+      "name": "open_browser",
+      "triggers": [
+        "open browser",
+        "launch brave",
+        "open internet"
+      ],
+      "reply": "Launching brave browser.",
+      "action": "brave-origin"
+    },
+    {
+      "name": "open_terminal",
+      "triggers": [
+        "open terminal",
+        "new terminal",
+        "spawn terminal"
+      ],
+      "reply": "Spawning a fresh terminal window.",
+      "action": "kitty"
+    },
+    {
+      "name": "volume_up",
+      "triggers": [
+        "volume up",
+        "increase volume",
+        "louder"
+      ],
+      "reply": "Increasing audio output.",
+      "action": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 15%+"
+    },
+    {
+      "name": "volume_down",
+      "triggers": [
+        "volume down",
+        "decrease volume",
+        "softer"
+      ],
+      "reply": "Lowering audio output.",
+      "action": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 30%-"
+    },
+    {
+      "name": "system_status",
+      "triggers": [
+        "system status",
+        "status report",
+        "diagnostics"
+      ],
+      "reply": "Running live system diagnostics.",
+      "action": "INTERNAL:DIAGNOSTICS"
+    },
+    {
+      "name": "protocol_zero",
+      "triggers": [
+        "protocol zero",
+        "lockdown",
+        "lock system",
+        "emergency lock"
+      ],
+      "reply": "Engaging Protocol Zero mathematical lockdown.",
+      "action": "/usr/local/bin/protocol-zero"
+    },
+    {
+      "name": "start_airsense",
+      "triggers": [
+        "start air sense",
+        "turn on air sense",
+        "music gestures"
+      ],
+      "reply": "Activating Air Sense hand gestures for music control.",
+      "action": "INTERNAL:AIRSENSE_START"
+    },
+    {
+      "name": "stop_airsense",
+      "triggers": [
+        "stop air sense",
+        "turn off air sense"
+      ],
+      "reply": "Deactivating Air Sense camera.",
+      "action": "INTERNAL:AIRSENSE_STOP"
+    },
+    {
+      "name": "hud_airsense",
+      "triggers": [
+        "air sense hud",
+        "show air sense",
+        "spatial hud"
+      ],
+      "reply": "Opening Air Sense spatial camera matrix.",
+      "action": "INTERNAL:AIRSENSE_HUD"
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+#!/bin/bash
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+
+VENV_PY="$HOME/.veer/venv/bin/python"
+ENGINE="$HOME/.veer/veer_engine.py"
+CONFIG="$HOME/Vault/veer_commands.json"
+
+restart_if_running() {
+    if pgrep -f "$ENGINE" >/dev/null 2>&1; then
+        pkill -f "$ENGINE" 2>/dev/null
+        nohup "$VENV_PY" "$ENGINE" >/dev/null 2>&1 &
+        echo "🔄 Veer hot-reloaded with your updated command registry!"
+    fi
+}
+
+case "$1" in
+    test)
+        pkill -f "$ENGINE" 2>/dev/null
+        echo "✦ Launching VEER in Live Console Mode (Press Ctrl+C to stop)..."
+        "$VENV_PY" "$ENGINE"
+        ;;
+    start)
+        pkill -f "$ENGINE" 2>/dev/null
+        notify-send -u normal -t 2000 "✦ VEER Igniting..." "Loading neural voice & mic stream"
+        nohup "$VENV_PY" "$ENGINE" >/dev/null 2>&1 &
+        echo "✅ VEER is now running silently in the background."
+        ;;
+    stop)
+        pkill -f "$ENGINE" 2>/dev/null
+        notify-send -u low -t 2000 "✦ VEER Offline" "Voice daemon stopped & mic released"
+        echo "🔇 VEER stopped."
+        ;;
+    list)
+        python3 - << 'PYEOF'
+import json, os
+cfg = json.load(open(os.path.expanduser("~/Vault/veer_commands.json")))
+print("\n✦ VEER VOICE COMMAND REGISTRY (~/Vault/veer_commands.json) ✦")
+print("-" * 76)
+for c in cfg.get("commands", []):
+    trigs = ", ".join(c.get("triggers", []))
+    print(f"• [{c.get('name')}]")
+    print(f"  Say    : \"{trigs}\"")
+    print(f"  Reply  : \"{c.get('reply')}\"")
+    print(f"  Action : {c.get('action')}\n")
+PYEOF
+        ;;
+    add)
+        python3 - << 'PYEOF'
+import json, os, re
+p = os.path.expanduser("~/Vault/veer_commands.json")
+cfg = json.load(open(p))
+print("\n✦ VEER INTERACTIVE COMMAND BUILDER ✦")
+name = input("1. Unique command ID (e.g., open_brave): ").strip().lower().replace(" ", "_")
+raw_trigs = input("2. Voice phrases to trigger it (comma-separated, e.g., open brave, launch browser): ").strip().lower()
+triggers = [re.sub(r"[^a-z ]", "", t).strip() for t in raw_trigs.split(",") if t.strip()]
+reply = input("3. What should Veer say out loud?: ").strip()
+action = input("4. Exact Linux terminal command to run: ").strip()
+
+if not name or not triggers or not action:
+    print("❌ Cancelled: Name, triggers, and action are required.")
+    raise SystemExit(1)
+
+cfg["commands"] = [c for c in cfg.get("commands", []) if c.get("name") != name]
+cfg["commands"].append({
+    "name": name,
+    "triggers": triggers,
+    "reply": reply or f"Executing {name.replace('_', ' ')}.",
+    "action": action
+})
+json.dump(cfg, open(p, "w"), indent=2)
+print(f"\n✅ Added '{name}' with triggers {triggers}!")
+PYEOF
+        restart_if_running
+        ;;
+    remove)
+        TARGET="$2"
+        if [ -z "$TARGET" ]; then
+            echo "Usage: veer remove <command_name>"
+            exit 1
+        fi
+        python3 - "$TARGET" << 'PYEOF'
+import json, os, sys
+target = sys.argv[1]
+p = os.path.expanduser("~/Vault/veer_commands.json")
+cfg = json.load(open(p))
+before = len(cfg.get("commands", []))
+cfg["commands"] = [c for c in cfg.get("commands", []) if c.get("name") != target]
+json.dump(cfg, open(p, "w"), indent=2)
+print(f"✅ Removed '{target}'." if len(cfg["commands"]) < before else f"⚠️ Command '{target}' not found.")
+PYEOF
+        restart_if_running
+        ;;
+    edit)
+        ${EDITOR:-micro} "$CONFIG"
+        if python3 -m json.tool "$CONFIG" >/dev/null 2>&1; then
+            echo "✅ JSON syntax verified."
+            restart_if_running
+        else
+            echo "❌ JSON syntax error detected in $CONFIG! Run 'veer edit' to fix the missing comma/quote."
+        fi
+        ;;
+    *)
+        echo "Usage: veer {start|stop|test|list|add|remove|edit}"
+        ;;
+esac

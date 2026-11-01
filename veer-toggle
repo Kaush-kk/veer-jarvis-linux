@@ -1,0 +1,16 @@
+#!/bin/bash
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+
+STATE_FILE="$HOME/.cache/veer_hud_state"
+mkdir -p "$HOME/.cache"
+
+if systemctl --user is-active --quiet veer.service || pgrep -f "veer_engine.py" > /dev/null; then
+    echo "DORMANT" > "$STATE_FILE"
+    /usr/local/bin/veer stop
+else
+    echo "BOOT" > "$STATE_FILE"
+    /usr/local/bin/veer start
+fi
