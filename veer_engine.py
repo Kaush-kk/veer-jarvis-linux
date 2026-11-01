@@ -1,4 +1,5 @@
-import os, sys, time, glob, json, hashlib, subprocess, threading, difflib
+#!/usr/bin/env python3
+import os, sys, time, glob, json, hashlib, shutil, threading, subprocess
 from collections import deque
 import numpy as np
 from vosk import Model, KaldiRecognizer, SetLogLevel
@@ -9,21 +10,20 @@ CONFIG_PATH = os.path.expanduser("~/Vault/veer_commands.json")
 MUSIC_DIR   = os.path.expanduser("~/Vault/Music")
 MODEL_PATH  = os.path.expanduser("~/.veer/model")
 CACHE_DIR   = os.path.expanduser("~/.veer/voice_cache")
-
 VOICE_MODEL = "en-GB-RyanNeural"
-
-# Phonetic error corrections for common speech-to-text mismatches
-PHONETIC_FIXES = {
-    "since": "sense", "sent": "sense", "cents": "sense", "essence": "air sense",
-    "bolt": "vault", "volt": "vault", "fault": "vault", "world": "vault",
-    "here": "veer", "fear": "veer", "dear": "veer", "beer": "veer",
-    "proses": "protocol", "practical": "protocol"
-}
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 track_idx = -1
+audio_queue = deque(maxlen=25)
 is_speaking = False
-audio_queue = deque(maxlen=15)
+running = True
+
+PHONETIC_MAP = {
+    "since": "sense", "sent": "sense", "cents": "sense", "sins": "sense",
+    "airlines": "air sense", "essence": "air sense",
+    "bolt": "vault", "volt": "vault", "fault": "vault", "bald": "vault",
+    "we": "veer", "here": "veer", "fear": "veer", "dear": "veer", "peer": "veer"
+}
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
@@ -70,8 +70,8 @@ def speak(text):
     else:
         subprocess.run(["espeak-ng", "-v", "en-us", "-s", "160", text],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.2)
     audio_queue.clear()
+    time.sleep(0.15)
     is_speaking = False
 
 def play_next_track():
@@ -85,10 +85,9 @@ def play_next_track():
         speak("No music files found in your Vault directory.")
         return
     track_idx = (track_idx + 1) % len(files)
-    track = files[track_idx]
     subprocess.run(["pkill", "-f", "mpv.*--no-video"], stderr=subprocess.DEVNULL)
-    subprocess.Popen(["mpv", "--no-video", "--loop-playlist=inf", track],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(["mpv", "--no-video", "--loop-playlist=inf", files[track_idx]],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 def run_diagnostics():
     load = os.getloadavg()[0]
@@ -101,25 +100,52 @@ def run_diagnostics():
     bat = f"{open(bat_path).read().strip()} percent" if os.path.exists(bat_path) else "AC power"
     speak(f"All systems nominal. CPU load is {load:.1f}. Memory usage is at {ram_pct} percent. Power is at {bat}.")
 
-def normalize_text(text):
-    words = text.lower().replace("[unk]", "").split()
-    fixed = [PHONETIC_FIXES.get(w, w) for w in words]
-    return " ".join(fixed)
+def execute_action(action, reply_text=""):
+    if action.startswith("INTERNAL:AIRSENSE_") or "air-sense" in action:
+        if not shutil.which("air-sense") and not os.path.exists("/usr/local/bin/air-sense"):
+            speak("Air Sense module not found on this system. Please install the Air Sense companion repository from GitHub.")
+            subprocess.Popen([
+                "notify-send", "-u", "critical", "-t", "5000",
+                "✦ Air-Sense Companion Missing",
+                "Install: git clone https://github.com/Kaush-kk/air-sense.git"
+            ])
+            return
+        if reply_text:
+            speak(reply_text)
+        sub = "hud" if ("HUD" in action or "hud" in action) else ("stop" if "STOP" in action or "stop" in action else "start")
+        subprocess.Popen(["/usr/local/bin/air-sense", sub],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return
 
-def matches_any(text, phrase_list):
-    for p in phrase_list:
-        p_clean = p.lower().strip()
-        if p_clean in text:
+    if reply_text:
+        speak(reply_text)
+
+    if action == "INTERNAL:PLAY_NEXT":
+        play_next_track()
+    elif action == "INTERNAL:DIAGNOSTICS":
+        run_diagnostics()
+    elif action:
+        subprocess.Popen(action, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+def normalize_phonetics(text):
+    words = text.lower().strip().split()
+    mapped = [PHONETIC_MAP.get(w, w) for w in words]
+    return " ".join(mapped)
+
+def match_trigger(heard, triggers):
+    h_norm = normalize_phonetics(heard)
+    h_words = set(h_norm.split())
+    for trig in triggers:
+        t_clean = trig.lower().strip()
+        if t_clean in h_norm:
             return True
-        # Fuzzy match check for natural pronunciation variance
-        p_words = p_clean.split()
-        if len(p_words) >= 2 and all(pw in text for pw in p_words):
-            return True
-        if difflib.SequenceMatcher(None, text, p_clean).ratio() >= 0.78:
+        t_words = set(t_clean.split())
+        if len(t_words) >= 2 and t_words.issubset(h_words):
             return True
     return False
 
-def mic_reader_worker():
+def mic_reader_thread():
+    proc = None
     try:
         proc = subprocess.Popen(
             ["parec", "--rate=16000", "--format=s16le", "--channels=1", "--raw", "--latency-msec=30"],
@@ -127,70 +153,56 @@ def mic_reader_worker():
         )
     except FileNotFoundError:
         proc = subprocess.Popen(
-            ["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-q", "-"],
+            ["arecord", "-D", "pipewire", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-q", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
-
-    while True:
+    while running:
         data = proc.stdout.read(1600)
         if not data:
             break
         if not is_speaking:
             audio_queue.append(data)
+    proc.terminate()
 
 def main():
+    global running
+    subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"], stderr=subprocess.DEVNULL)
+    subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.00"], stderr=subprocess.DEVNULL)
+
     cfg = load_config()
     print("✦ Pre-caching Veer neural voice lines...")
     pre_cache_voice_lines(cfg)
 
     model = Model(MODEL_PATH)
-    # Using full dictionary vocabulary (no grammar restriction) prevents multi-word clipping
     rec = KaldiRecognizer(model, 16000)
 
-    reader = threading.Thread(target=mic_reader_worker, daemon=True)
-    reader.start()
-
+    threading.Thread(target=mic_reader_thread, daemon=True).start()
     awake = True
     speak(cfg.get("wake_reply", "Veer online."))
-    print("🟢 VEER FULL-DICTIONARY MODE ACTIVE (Speak naturally)")
+    print("🟢 VEER LIVE (Zero-Lag Stream Active — Speak naturally)")
 
     try:
         while True:
             if not audio_queue:
-                time.sleep(0.01)
+                time.sleep(0.015)
                 continue
+            chunk = audio_queue.popleft()
+            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+            peak = np.max(np.abs(samples)) if len(samples) else 0
+            if peak > 300:
+                gain = min(1.8, 18000.0 / max(peak, 1.0))
+                chunk = np.clip(samples * gain, -32768, 32767).astype(np.int16).tobytes()
 
-            raw_data = audio_queue.popleft()
-            samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
-            peak = int(np.max(np.abs(samples))) if len(samples) else 0
-
-            # Dynamic leveling
-            if 300 < peak < 16000:
-                gain = min(2.2, 14000.0 / peak)
-                samples = np.clip(samples * gain, -32768, 32767).astype(np.int16)
-                pcm_data = samples.tobytes()
-            else:
-                pcm_data = raw_data
-
-            is_final = rec.AcceptWaveform(pcm_data)
-            if is_final:
-                raw_text = json.loads(rec.Result()).get("text", "")
-            else:
-                raw_text = json.loads(rec.PartialResult()).get("partial", "")
-
-            text = normalize_text(raw_text)
-
-            if sys.stdout.isatty() and text:
-                bars = min(10, peak // 1500)
-                meter = "█" * bars + "░" * (10 - bars)
-                sys.stdout.write(f"\r🎙️ Mic [{meter}] Heard: {text:<42}")
-                sys.stdout.flush()
-
+            is_final = rec.AcceptWaveform(chunk)
+            text = json.loads(rec.Result()).get("text", "").strip() if is_final else json.loads(rec.PartialResult()).get("partial", "").strip()
             if not text:
                 continue
 
-            # 1. Sleep Triggers
-            if matches_any(text, cfg.get("sleep_phrases", [])):
+            norm_text = normalize_phonetics(text)
+            sys.stdout.write(f"\r🎙️ Hearing: {norm_text:<48}")
+            sys.stdout.flush()
+
+            if match_trigger(norm_text, cfg.get("sleep_phrases", [])):
                 if awake:
                     awake = False
                     speak(cfg.get("sleep_reply", "Standing by."))
@@ -198,39 +210,26 @@ def main():
                 audio_queue.clear()
                 continue
 
-            # 2. Wake Triggers
-            if matches_any(text, cfg.get("wake_phrases", [])) and not awake:
+            if match_trigger(norm_text, cfg.get("wake_phrases", [])) and not awake:
                 awake = True
                 speak(cfg.get("wake_reply", "Veer online."))
                 rec.Reset()
                 audio_queue.clear()
                 continue
 
-            if not awake and "veer" not in text:
+            if not awake and "veer" not in norm_text:
                 if is_final:
                     rec.Reset()
                 continue
 
-            # 3. Match Commands
             for cmd in cfg.get("commands", []):
-                if matches_any(text, cmd.get("triggers", [])):
-                    speak(cmd.get("reply", ""))
-                    action = cmd.get("action", "")
-                    if action == "INTERNAL:PLAY_NEXT":
-                        play_next_track()
-                    elif action == "INTERNAL:DIAGNOSTICS":
-                        run_diagnostics()
-                    elif action:
-                        subprocess.Popen(action, shell=True,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if match_trigger(norm_text, cmd.get("triggers", [])):
+                    execute_action(cmd.get("action", ""), cmd.get("reply", ""))
                     rec.Reset()
                     audio_queue.clear()
                     break
-
-            if is_final:
-                rec.Reset()
-
     except KeyboardInterrupt:
+        running = False
         print("\n🔇 Veer shutting down.")
 
 if __name__ == "__main__":
