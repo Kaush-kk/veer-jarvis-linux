@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import os, sys, time, glob, json, hashlib, shutil, threading, subprocess
+import os, sys, time, glob, json, hashlib, shutil, difflib, threading, subprocess
 from collections import deque
 import numpy as np
 from vosk import Model, KaldiRecognizer, SetLogLevel
 
 SetLogLevel(-1)
+
+os.environ["PATH"] = os.path.expanduser("~/.local/bin") + ":/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
 
 CONFIG_PATH = os.path.expanduser("~/Vault/veer_commands.json")
 MUSIC_DIR   = os.path.expanduser("~/Vault/Music")
@@ -19,6 +21,8 @@ is_speaking = False
 running = True
 
 PHONETIC_MAP = {
+    "favourite": "favorite", "favourites": "favorites",
+    "colour": "color", "centre": "center",
     "since": "sense", "sent": "sense", "cents": "sense", "sins": "sense",
     "airlines": "air sense", "essence": "air sense",
     "bolt": "vault", "volt": "vault", "fault": "vault", "bald": "vault",
@@ -125,23 +129,37 @@ def execute_action(action, reply_text=""):
     elif action == "INTERNAL:DIAGNOSTICS":
         run_diagnostics()
     elif action:
-        subprocess.Popen(action, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen(
+            action, shell=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
 
 def normalize_phonetics(text):
-    words = text.lower().strip().split()
+    words = text.lower().replace("[unk]", "").strip().split()
     mapped = [PHONETIC_MAP.get(w, w) for w in words]
     return " ".join(mapped)
 
 def match_trigger(heard, triggers):
     h_norm = normalize_phonetics(heard)
-    h_words = set(h_norm.split())
+    if not h_norm:
+        return False
+    h_words = h_norm.split()
+    h_set = set(h_words)
     for trig in triggers:
-        t_clean = trig.lower().strip()
-        if t_clean in h_norm:
+        t_norm = normalize_phonetics(trig)
+        if not t_norm:
+            continue
+        if t_norm in h_norm:
             return True
-        t_words = set(t_clean.split())
-        if len(t_words) >= 2 and t_words.issubset(h_words):
+        t_words = t_norm.split()
+        if len(t_words) >= 2 and set(t_words).issubset(h_set):
             return True
+        n = len(t_words)
+        for i in range(max(1, len(h_words) - n + 1)):
+            window = " ".join(h_words[i:i + n])
+            if difflib.SequenceMatcher(None, window, t_norm).ratio() >= 0.82:
+                return True
     return False
 
 def mic_reader_thread():

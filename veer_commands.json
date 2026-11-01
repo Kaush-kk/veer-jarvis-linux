@@ -134,6 +134,15 @@
       ],
       "reply": "Opening Air Sense spatial camera matrix.",
       "action": "INTERNAL:AIRSENSE_HUD"
+    },
+    {
+      "name": "favourite_song",
+      "triggers": [
+        "favourite song",
+        "play favourite"
+      ],
+      "reply": "playing your favourite song, streaming directly from metrolist",
+      "action": "metrolist laboon ko"
     }
   ]
 }
